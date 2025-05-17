@@ -9,9 +9,9 @@ echo $2 > /tmp/switchsourceheader_dir
 
 if grep -qi ubuntu /etc/os-release; then
   # in ros container so no systemd
-  python3 /home/tenzin/.scripts/switch_source_header.py > /tmp/switchsourceheader_path
+  python3 /home/tenzin/scripts/switch_source_header.py > /tmp/switchsourceheader_path
 else
   # else enable journalctl logging
-  python3 /home/tenzin/.scripts/switch_source_header.py -l > /tmp/switchsourceheader_path
+  python3 /home/tenzin/scripts/switch_source_header.py -l > /tmp/switchsourceheader_path
 fi
 

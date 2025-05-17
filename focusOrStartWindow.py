@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import sys
 import os
 import json
@@ -5,6 +7,7 @@ import subprocess
 
 try:
     exec_command, class_name = sys.argv[1:]
+    print(f"got: exec: {exec_command}, class: {class_name}")
 except:
     print("Please enter 2 command line arguments")
     os._exit(1)

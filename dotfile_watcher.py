@@ -47,6 +47,7 @@ class GitCommitHandler(FileSystemEventHandler):
         ]
         self.gitignore_patterns = {}  # Cache gitignore patterns per directory
         self._load_gitignore_patterns()
+        self._commit_existing_changes()
         self.start_fetch_timer()
         
     def _run_git_command(self, cmd, cwd, description="Git command"):
@@ -720,6 +721,93 @@ class GitCommitHandler(FileSystemEventHandler):
                     
         except Exception as e:
             print(f"❌ Commit notification error: {e}")
+    
+    def _commit_existing_changes(self):
+        """Check for and commit any existing uncommitted changes on startup"""
+        print("🔍 Checking for existing uncommitted changes...")
+        
+        # Check main repo
+        self._commit_existing_in_repo(self.repo_dir, "main repo")
+        
+        # Check all submodules
+        for submodule in self.submodules:
+            submodule_name = submodule.name
+            self._commit_existing_in_repo(submodule, f"submodule {submodule_name}")
+    
+    def _commit_existing_in_repo(self, repo_dir, repo_name):
+        """Check for and commit existing changes in a specific repository"""
+        try:
+            # Check for staged changes
+            staged_result = self._run_git_command(
+                ['git', 'diff', '--cached', '--name-only'],
+                repo_dir,
+                f"Check staged changes ({repo_name})"
+            )
+            
+            # Check for unstaged changes
+            unstaged_result = self._run_git_command(
+                ['git', 'diff', '--name-only'],
+                repo_dir,
+                f"Check unstaged changes ({repo_name})"
+            )
+            
+            # Check for untracked files (excluding ignored ones)
+            untracked_result = self._run_git_command(
+                ['git', 'ls-files', '--others', '--exclude-standard'],
+                repo_dir,
+                f"Check untracked files ({repo_name})"
+            )
+            
+            has_staged = staged_result.returncode == 0 and staged_result.stdout.strip()
+            has_unstaged = unstaged_result.returncode == 0 and unstaged_result.stdout.strip()
+            has_untracked = untracked_result.returncode == 0 and untracked_result.stdout.strip()
+            
+            if has_staged or has_unstaged or has_untracked:
+                print(f"📝 Found uncommitted changes in {repo_name}")
+                
+                # Add all changes (staged, unstaged, and untracked)
+                add_result = self._run_git_command(['git', 'add', '.'], repo_dir, f"Git add existing changes ({repo_name})")
+                if add_result.returncode != 0:
+                    return
+                
+                # Create commit message based on what we found
+                change_types = []
+                if has_staged:
+                    change_types.append("staged changes")
+                if has_unstaged:
+                    change_types.append("unstaged changes")
+                if has_untracked:
+                    change_types.append("untracked files")
+                
+                commit_message = f"startup commit: {', '.join(change_types)} in {repo_name}"
+                
+                # Commit the changes
+                commit_result = self._run_git_command(
+                    ['git', 'commit', '-m', commit_message],
+                    repo_dir,
+                    f"Git commit existing changes ({repo_name})"
+                )
+                
+                if commit_result.returncode == 0:
+                    print(f"✓ Startup commit: {commit_message}")
+                    
+                    # Send notification for main repo commits
+                    if repo_dir == self.repo_dir:
+                        self._send_commit_notification(commit_message)
+                    
+                    # Push the changes
+                    if repo_dir == self.repo_dir:
+                        self._push_changes(repo_dir, "main repo")
+                    else:
+                        self._push_changes(repo_dir, f"submodule {repo_dir.name}")
+                        # Also update the submodule reference in main repo
+                        self._commit_submodule_update(repo_dir)
+                        
+            else:
+                print(f"✓ No uncommitted changes found in {repo_name}")
+                
+        except Exception as e:
+            print(f"❌ Error checking existing changes in {repo_name}: {e}")
 
 def main():
     # Expand the watch directory path

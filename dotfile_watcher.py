@@ -49,18 +49,55 @@ class GitCommitHandler(FileSystemEventHandler):
         self._load_gitignore_patterns()
         self.start_fetch_timer()
         
+    def _run_git_command(self, cmd, cwd, description="Git command"):
+        """Run a git command with proper error logging"""
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=cwd,
+                capture_output=True,
+                text=True
+            )
+            
+            # Log command details if it fails
+            if result.returncode != 0:
+                cmd_str = ' '.join(cmd)
+                print(f"❌ {description} failed: {cmd_str}")
+                print(f"   Working directory: {cwd}")
+                print(f"   Return code: {result.returncode}")
+                if result.stdout.strip():
+                    print(f"   STDOUT: {result.stdout.strip()}")
+                if result.stderr.strip():
+                    print(f"   STDERR: {result.stderr.strip()}")
+            
+            return result
+            
+        except subprocess.CalledProcessError as e:
+            cmd_str = ' '.join(cmd)
+            print(f"❌ {description} subprocess error: {cmd_str}")
+            print(f"   Working directory: {cwd}")
+            print(f"   Exception: {e}")
+            raise
+        except Exception as e:
+            cmd_str = ' '.join(cmd)
+            print(f"❌ {description} unexpected error: {cmd_str}")
+            print(f"   Working directory: {cwd}")
+            print(f"   Exception: {e}")
+            raise
+        
     def _get_submodules(self):
         """Get list of submodule paths"""
         try:
-            result = subprocess.run(
+            result = self._run_git_command(
                 ['git', 'submodule', 'foreach', '--quiet', 'echo $sm_path'],
-                cwd=self.repo_dir,
-                capture_output=True,
-                text=True,
-                check=True
+                self.repo_dir,
+                "Get submodules"
             )
-            return [Path(self.repo_dir / line.strip()) for line in result.stdout.strip().split('\n') if line.strip()]
-        except subprocess.CalledProcessError:
+            if result.returncode == 0:
+                return [Path(self.repo_dir / line.strip()) for line in result.stdout.strip().split('\n') if line.strip()]
+            else:
+                return []
+        except Exception:
             return []
     
     def _is_in_submodule(self, file_path):
@@ -277,47 +314,59 @@ class GitCommitHandler(FileSystemEventHandler):
         """Commit multiple changes in a submodule as a single commit"""
         commit_message = self._create_squashed_commit_message(changes, submodule_dir.name)
         
-        # Run git commands in the submodule
-        subprocess.run(['git', 'add', '.'], cwd=submodule_dir, check=True)
-        result = subprocess.run(
-            ['git', 'commit', '-m', commit_message], 
-            cwd=submodule_dir, 
-            capture_output=True, 
-            text=True
-        )
-        
-        if result.returncode == 0:
-            print(f"✓ Submodule commit: {commit_message}")
-            # Push the submodule changes
-            self._push_changes(submodule_dir, f"submodule {submodule_dir.name}")
-        else:
-            if "nothing to commit" in result.stdout:
-                print(f"No changes to commit in submodule {submodule_dir.name}")
+        try:
+            # Run git add in the submodule
+            add_result = self._run_git_command(['git', 'add', '.'], submodule_dir, "Git add (submodule)")
+            if add_result.returncode != 0:
+                return
+            
+            # Run git commit in the submodule
+            commit_result = self._run_git_command(
+                ['git', 'commit', '-m', commit_message], 
+                submodule_dir, 
+                "Git commit (submodule)"
+            )
+            
+            if commit_result.returncode == 0:
+                print(f"✓ Submodule commit: {commit_message}")
+                # Push the submodule changes
+                self._push_changes(submodule_dir, f"submodule {submodule_dir.name}")
             else:
-                print(f"Submodule commit failed: {result.stderr}")
+                if "nothing to commit" in commit_result.stdout:
+                    print(f"No changes to commit in submodule {submodule_dir.name}")
+                    
+        except Exception as e:
+            print(f"❌ Error during submodule commit: {e}")
     
     def _commit_squashed_main_repo(self, changes):
         """Commit multiple changes in main repo as a single commit"""
         commit_message = self._create_squashed_commit_message(changes, "main repo")
         
-        # Run git commands
-        subprocess.run(['git', 'add', '.'], cwd=self.repo_dir, check=True)
-        result = subprocess.run(
-            ['git', 'commit', '-m', commit_message], 
-            cwd=self.repo_dir, 
-            capture_output=True, 
-            text=True
-        )
-        
-        if result.returncode == 0:
-            print(f"✓ Committed: {commit_message}")
-            # Push the main repo changes
-            self._push_changes(self.repo_dir, "main repo")
-        else:
-            if "nothing to commit" in result.stdout:
-                print(f"No changes to commit in main repo")
+        try:
+            # Run git add in the main repo
+            add_result = self._run_git_command(['git', 'add', '.'], self.repo_dir, "Git add (main repo)")
+            if add_result.returncode != 0:
+                return
+            
+            # Run git commit in the main repo
+            commit_result = self._run_git_command(
+                ['git', 'commit', '-m', commit_message], 
+                self.repo_dir, 
+                "Git commit (main repo)"
+            )
+            
+            if commit_result.returncode == 0:
+                print(f"✓ Committed: {commit_message}")
+                # Send notification for main repo commit
+                self._send_commit_notification(commit_message)
+                # Push the main repo changes
+                self._push_changes(self.repo_dir, "main repo")
             else:
-                print(f"Git commit failed: {result.stderr}")
+                if "nothing to commit" in commit_result.stdout:
+                    print(f"No changes to commit in main repo")
+                    
+        except Exception as e:
+            print(f"❌ Error during main repo commit: {e}")
     
     def _create_squashed_commit_message(self, changes, location):
         """Create a commit message that summarizes all changes"""
@@ -355,22 +404,13 @@ class GitCommitHandler(FileSystemEventHandler):
     def _push_changes(self, repo_dir, repo_name):
         """Push changes to remote repository"""
         try:
-            result = subprocess.run(
-                ['git', 'push'],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True
-            )
+            result = self._run_git_command(['git', 'push'], repo_dir, f"Git push ({repo_name})")
             
             if result.returncode == 0:
                 print(f"🚀 Pushed {repo_name} to remote")
-            else:
-                print(f"⚠️  Push failed for {repo_name}: {result.stderr.strip()}")
                 
-        except subprocess.CalledProcessError as e:
-            print(f"⚠️  Error pushing {repo_name}: {e}")
         except Exception as e:
-            print(f"⚠️  Unexpected error pushing {repo_name}: {e}")
+            print(f"❌ Error pushing {repo_name}: {e}")
     
     def _commit_in_submodule(self, file_path, event_type, submodule_dir):
         """Commit changes in a submodule"""
@@ -401,24 +441,35 @@ class GitCommitHandler(FileSystemEventHandler):
         submodule_name = submodule_dir.relative_to(self.repo_dir)
         commit_message = f"Update submodule {submodule_name}"
         
-        # Add the submodule update to the main repo
-        subprocess.run(['git', 'add', str(submodule_name)], cwd=self.repo_dir, check=True)
-        result = subprocess.run(
-            ['git', 'commit', '-m', commit_message], 
-            cwd=self.repo_dir, 
-            capture_output=True, 
-            text=True
-        )
-        
-        if result.returncode == 0:
-            print(f"✓ Main repo commit: {commit_message}")
-            # Push the main repo changes
-            self._push_changes(self.repo_dir, "main repo")
-        else:
-            if "nothing to commit" in result.stdout:
-                print(f"No submodule changes to commit in main repo")
+        try:
+            # Add the submodule update to the main repo
+            add_result = self._run_git_command(
+                ['git', 'add', str(submodule_name)], 
+                self.repo_dir, 
+                "Git add submodule update"
+            )
+            if add_result.returncode != 0:
+                return
+            
+            # Commit the submodule update
+            commit_result = self._run_git_command(
+                ['git', 'commit', '-m', commit_message], 
+                self.repo_dir, 
+                "Git commit submodule update"
+            )
+            
+            if commit_result.returncode == 0:
+                print(f"✓ Main repo commit: {commit_message}")
+                # Send notification for main repo commit
+                self._send_commit_notification(commit_message)
+                # Push the main repo changes
+                self._push_changes(self.repo_dir, "main repo")
             else:
-                print(f"Main repo commit failed: {result.stderr}")
+                if "nothing to commit" in commit_result.stdout:
+                    print(f"No submodule changes to commit in main repo")
+                    
+        except Exception as e:
+            print(f"❌ Error during submodule update commit: {e}")
     
     def _commit_in_main_repo(self, file_path, event_type):
         """Commit changes in main repo (non-submodule files)"""
@@ -437,6 +488,8 @@ class GitCommitHandler(FileSystemEventHandler):
         
         if result.returncode == 0:
             print(f"✓ Committed: {commit_message}")
+            # Send notification for main repo commit
+            self._send_commit_notification(commit_message)
             # Push the main repo changes
             self._push_changes(self.repo_dir, "main repo")
         else:
@@ -535,23 +588,20 @@ class GitCommitHandler(FileSystemEventHandler):
         """Fetch from remote and check for changes on any branch"""
         try:
             # Fetch from remote
-            fetch_result = subprocess.run(
+            fetch_result = self._run_git_command(
                 ['git', 'fetch', '--all'],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True
+                repo_dir,
+                f"Git fetch ({repo_name})"
             )
             
             if fetch_result.returncode != 0:
-                print(f"⚠️  Fetch failed for {repo_name}: {fetch_result.stderr.strip()}")
                 return []
             
             # Get all local branches
-            branches_result = subprocess.run(
+            branches_result = self._run_git_command(
                 ['git', 'branch', '--format=%(refname:short)'],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True
+                repo_dir,
+                f"Git branch list ({repo_name})"
             )
             
             if branches_result.returncode != 0:
@@ -566,22 +616,20 @@ class GitCommitHandler(FileSystemEventHandler):
                     
                 # Check if remote branch exists
                 remote_branch = f"origin/{branch}"
-                remote_check = subprocess.run(
+                remote_check = self._run_git_command(
                     ['git', 'rev-parse', '--verify', remote_branch],
-                    cwd=repo_dir,
-                    capture_output=True,
-                    text=True
+                    repo_dir,
+                    f"Git rev-parse ({repo_name})"
                 )
                 
                 if remote_check.returncode != 0:
                     continue
                 
                 # Compare local and remote branches
-                diff_result = subprocess.run(
+                diff_result = self._run_git_command(
                     ['git', 'rev-list', '--count', f"{branch}..{remote_branch}"],
-                    cwd=repo_dir,
-                    capture_output=True,
-                    text=True
+                    repo_dir,
+                    f"Git rev-list ({repo_name})"
                 )
                 
                 if diff_result.returncode == 0:
@@ -628,18 +676,50 @@ class GitCommitHandler(FileSystemEventHandler):
             message = '\n'.join(message_parts)
             
             # Send notification
-            subprocess.run([
-                'notify-send',
-                '-i', 'git',
-                '-t', '10000',  # 10 second timeout
-                title,
-                message
-            ])
+            try:
+                result = subprocess.run([
+                    'notify-send',
+                    '-i', 'git',
+                    '-t', '10000',  # 10 second timeout
+                    title,
+                    message
+                ], capture_output=True, text=True)
+                
+                if result.returncode != 0:
+                    print(f"❌ Notification failed: notify-send")
+                    print(f"   Return code: {result.returncode}")
+                    if result.stderr.strip():
+                        print(f"   STDERR: {result.stderr.strip()}")
+                        
+            except Exception as e:
+                print(f"❌ Notification error: {e}")
             
             print(f"📡 Sent notification: {len(all_changes)} branches with changes")
             
         except Exception as e:
             print(f"⚠️  Error sending notification: {e}")
+    
+    def _send_commit_notification(self, commit_message):
+        """Send desktop notification about a main repo commit"""
+        try:
+            title = "💾 Dotfiles Committed"
+            
+            result = subprocess.run([
+                'notify-send',
+                '-i', 'git',
+                '-t', '5000',  # 5 second timeout
+                title,
+                commit_message
+            ], capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                print(f"❌ Commit notification failed: notify-send")
+                print(f"   Return code: {result.returncode}")
+                if result.stderr.strip():
+                    print(f"   STDERR: {result.stderr.strip()}")
+                    
+        except Exception as e:
+            print(f"❌ Commit notification error: {e}")
 
 def main():
     # Expand the watch directory path

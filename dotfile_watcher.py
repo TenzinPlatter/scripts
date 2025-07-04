@@ -372,7 +372,7 @@ class GitCommitHandler(FileSystemEventHandler):
         """Create a commit message that summarizes all changes"""
         if len(changes) == 1:
             change = changes[0]
-            return f"Auto-commit: {change['event_type']} {change['file_name']} in {location}"
+            return f"{change['event_type']} {change['file_name']} in {location}"
         
         # Group changes by type
         created_files = [c['file_name'] for c in changes if c['event_type'] == 'created']
@@ -399,7 +399,7 @@ class GitCommitHandler(FileSystemEventHandler):
             else:
                 message_parts.append(f"deleted {len(deleted_files)} files")
         
-        return f"Auto-commit: {', '.join(message_parts)} in {location}"
+        return f"{', '.join(message_parts)} in {location}"
     
     def _push_changes(self, repo_dir, repo_name):
         """Push changes to remote repository"""
@@ -415,7 +415,7 @@ class GitCommitHandler(FileSystemEventHandler):
     def _commit_in_submodule(self, file_path, event_type, submodule_dir):
         """Commit changes in a submodule"""
         file_name = Path(file_path).name
-        commit_message = f"Auto-commit: {event_type} {file_name}"
+        commit_message = f"{event_type} {file_name}"
         
         # Run git commands in the submodule
         subprocess.run(['git', 'add', '.'], cwd=submodule_dir, check=True)
@@ -475,7 +475,7 @@ class GitCommitHandler(FileSystemEventHandler):
         """Commit changes in main repo (non-submodule files)"""
         changed_dir = self.get_relative_directory(file_path)
         file_name = Path(file_path).name
-        commit_message = f"Auto-commit: {event_type} {file_name} in {changed_dir}"
+        commit_message = f"{event_type} {file_name} in {changed_dir}"
         
         # Run git commands
         subprocess.run(['git', 'add', '.'], cwd=self.repo_dir, check=True)

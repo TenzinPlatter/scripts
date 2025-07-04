@@ -70,6 +70,7 @@ class GitCommitHandler(FileSystemEventHandler):
             '.bak'
         ]
         self.gitignore_patterns = {}  # Cache gitignore patterns per directory
+        self.recent_temp_files = {}  # Track files that might be temporary
         self._load_gitignore_patterns()
         self._commit_existing_changes()
         self.start_fetch_timer()
@@ -151,6 +152,29 @@ class GitCommitHandler(FileSystemEventHandler):
         
         # Check if filename ends with excluded extensions
         if file_name.endswith(('.lock', '.tmp', '.swp', '.swo', '~', '.bak')):
+            return True
+        
+        # Check for numeric-only filenames (common for temp files)
+        if file_name.isdigit():
+            print(f"🔍 Excluding numeric temp file: {file_name}")
+            return True
+        
+        # Check for vim/editor temp file patterns
+        if (file_name.startswith('.') and file_name.endswith('.swp')) or \
+           (file_name.startswith('.') and file_name.endswith('.swo')) or \
+           file_name.startswith('4913') or \
+           (len(file_name) == 4 and file_name.isdigit()) or \
+           (len(file_name) <= 6 and file_name.isdigit()):
+            print(f"🔍 Excluding editor temp file: {file_name}")
+            return True
+        
+        # Check for other suspicious patterns
+        if (file_name.startswith('.#') or  # Emacs lock files
+            file_name.endswith('#') or     # Emacs backup files
+            file_name.startswith('#') or   # Various temp files
+            file_name.endswith('.orig') or # Git merge files
+            file_name.endswith('.rej')):   # Patch reject files
+            print(f"🔍 Excluding suspicious file: {file_name}")
             return True
         
         # Check if it's a git internal file (more comprehensive)

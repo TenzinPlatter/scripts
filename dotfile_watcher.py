@@ -5,6 +5,7 @@ import time
 import subprocess
 import threading
 import fnmatch
+import yaml
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -13,65 +14,74 @@ from watchdog.events import FileSystemEventHandler
 sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', 1)
 sys.stderr = os.fdopen(sys.stderr.fileno(), 'w', 1)
 
-# Configuration
-WATCH_DIRECTORY = os.path.expanduser("~/.dotfiles")  # Change this to your desired directory
-REPO_DIRECTORY = WATCH_DIRECTORY  # Assuming the watch directory is the git repo root
-COMMIT_DELAY = 60  # Delay in seconds before committing after last change
-FETCH_INTERVAL = 600  # Fetch every 10 minutes (600 seconds)
+def load_config():
+    """Load configuration from YAML file with fallback to defaults"""
+    config_path = Path(__file__).parent / "config.yaml"
+    
+    # Default configuration
+    default_config = {
+        'watch_directory': '~/.dotfiles',
+        'repo_directory': '~/.dotfiles',
+        'commit_delay': 60,
+        'fetch_interval': 600,
+        'enable_notifications': True,
+        'notify_on_commit': True,
+        'notify_on_remote_changes': True,
+        'auto_push': True,
+        'respect_gitignore': True,
+        'excluded_patterns': [
+            '.git/', '.git\\', '/.git/', '\\.git\\', 'index.lock', 'COMMIT_EDITMSG',
+            'HEAD.lock', 'refs/heads/', 'refs/remotes/', 'logs/HEAD', 'logs/refs/',
+            'objects/', 'hooks/', 'info/', 'packed-refs', 'config.lock', 'shallow.lock',
+            'modules/', '.git/index', '.git/HEAD', '.git/refs/', '.git/logs/',
+            '.git/objects/', '.git/modules/', 'ORIG_HEAD', 'FETCH_HEAD', 'MERGE_HEAD',
+            'CHERRY_PICK_HEAD', '.tmp_', '__pycache__/', '.pyc', '.pyo', '.swp',
+            '.swo', '.tmp', '~', '.bak'
+        ]
+    }
+    
+    try:
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                user_config = yaml.safe_load(f) or {}
+            # Merge user config with defaults
+            config = {**default_config, **user_config}
+            print(f"📄 Loaded configuration from {config_path}")
+        else:
+            config = default_config
+            print(f"⚠️  Config file not found at {config_path}, using defaults")
+    except Exception as e:
+        print(f"❌ Error loading config file: {e}")
+        print("   Using default configuration")
+        config = default_config
+    
+    # Expand user paths
+    config['watch_directory'] = os.path.expanduser(config['watch_directory'])
+    config['repo_directory'] = os.path.expanduser(config['repo_directory'])
+    
+    return config
+
+# Load configuration
+CONFIG = load_config()
 
 class GitCommitHandler(FileSystemEventHandler):
-    def __init__(self, watch_dir, repo_dir):
-        self.watch_dir = Path(watch_dir).resolve()
-        self.repo_dir = Path(repo_dir).resolve()
+    def __init__(self, config):
+        self.config = config
+        self.watch_dir = Path(config['watch_directory']).resolve()
+        self.repo_dir = Path(config['repo_directory']).resolve()
         self.submodules = self._get_submodules()
         self.pending_commits = {}  # Track pending commits per directory
         self.commit_timers = {}  # Track active timers per directory
         self.timer_lock = threading.Lock()  # Thread safety for timer operations
         self.fetch_timer = None  # Timer for periodic fetching
-        self.excluded_patterns = [
-            '.git/',
-            '.git\\',
-            '/.git/',
-            '\\.git\\',
-            'index.lock',
-            'COMMIT_EDITMSG',
-            'HEAD.lock',
-            'refs/heads/',
-            'refs/remotes/',
-            'logs/HEAD',
-            'logs/refs/',
-            'objects/',
-            'hooks/',
-            'info/',
-            'packed-refs',
-            'config.lock',
-            'shallow.lock',
-            'modules/',
-            '.tmp_',
-            '__pycache__/',
-            '.pyc',
-            '.pyo',
-            # More comprehensive git exclusions
-            '.git/index',
-            '.git/HEAD',
-            '.git/refs/',
-            '.git/logs/',
-            '.git/objects/',
-            '.git/modules/',
-            'ORIG_HEAD',
-            'FETCH_HEAD',
-            'MERGE_HEAD',
-            'CHERRY_PICK_HEAD',
-            # Temporary files
-            '.swp',
-            '.swo',
-            '.tmp',
-            '~',
-            '.bak'
-        ]
+        self.excluded_patterns = config['excluded_patterns']
         self.gitignore_patterns = {}  # Cache gitignore patterns per directory
         self.recent_temp_files = {}  # Track files that might be temporary
-        self._load_gitignore_patterns()
+        
+        # Load gitignore patterns if enabled
+        if self.config['respect_gitignore']:
+            self._load_gitignore_patterns()
+        
         self._commit_existing_changes()
         self.start_fetch_timer()
         

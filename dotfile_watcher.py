@@ -1,0 +1,680 @@
+#!/usr/bin/env python3
+import os
+import time
+import subprocess
+import threading
+import fnmatch
+from pathlib import Path
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
+# Configuration
+WATCH_DIRECTORY = os.path.expanduser("~/.dotfiles")  # Change this to your desired directory
+REPO_DIRECTORY = WATCH_DIRECTORY  # Assuming the watch directory is the git repo root
+COMMIT_DELAY = 60  # Delay in seconds before committing after last change
+FETCH_INTERVAL = 600  # Fetch every 10 minutes (600 seconds)
+
+class GitCommitHandler(FileSystemEventHandler):
+    def __init__(self, watch_dir, repo_dir):
+        self.watch_dir = Path(watch_dir).resolve()
+        self.repo_dir = Path(repo_dir).resolve()
+        self.submodules = self._get_submodules()
+        self.pending_commits = {}  # Track pending commits per directory
+        self.commit_timers = {}  # Track active timers per directory
+        self.timer_lock = threading.Lock()  # Thread safety for timer operations
+        self.fetch_timer = None  # Timer for periodic fetching
+        self.excluded_patterns = [
+            '.git/',
+            '.git\\',
+            'index.lock',
+            'COMMIT_EDITMSG',
+            'HEAD.lock',
+            'refs/heads/',
+            'refs/remotes/',
+            'logs/HEAD',
+            'logs/refs/',
+            'objects/',
+            'hooks/',
+            'info/',
+            'packed-refs',
+            'config.lock',
+            'shallow.lock',
+            'modules/',
+            '.tmp_',
+            '__pycache__/',
+            '.pyc',
+            '.pyo'
+        ]
+        self.gitignore_patterns = {}  # Cache gitignore patterns per directory
+        self._load_gitignore_patterns()
+        self.start_fetch_timer()
+        
+    def _get_submodules(self):
+        """Get list of submodule paths"""
+        try:
+            result = subprocess.run(
+                ['git', 'submodule', 'foreach', '--quiet', 'echo $sm_path'],
+                cwd=self.repo_dir,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            return [Path(self.repo_dir / line.strip()) for line in result.stdout.strip().split('\n') if line.strip()]
+        except subprocess.CalledProcessError:
+            return []
+    
+    def _is_in_submodule(self, file_path):
+        """Check if file is in a submodule"""
+        file_path = Path(file_path).resolve()
+        return any(file_path.is_relative_to(submodule) for submodule in self.submodules)
+    
+    def _get_submodule_for_file(self, file_path):
+        """Get the submodule directory for a file"""
+        file_path = Path(file_path).resolve()
+        for submodule in self.submodules:
+            if file_path.is_relative_to(submodule):
+                return submodule
+        return None
+    
+    def _should_exclude_file(self, file_path):
+        """Check if file should be excluded from git operations"""
+        file_path_str = str(file_path)
+        
+        # Check if any excluded pattern matches the file path
+        for pattern in self.excluded_patterns:
+            if pattern in file_path_str:
+                return True
+        
+        # Additional check for git internal files
+        if '/.git/' in file_path_str or '\\.git\\' in file_path_str:
+            return True
+        
+        # Check if file matches gitignore patterns
+        if self._matches_gitignore(file_path):
+            return True
+        
+        return False
+    
+    def _load_gitignore_patterns(self):
+        """Load gitignore patterns from all .gitignore files"""
+        # Load main repo gitignore
+        self._load_gitignore_for_repo(self.repo_dir)
+        
+        # Load submodule gitignores
+        for submodule in self.submodules:
+            self._load_gitignore_for_repo(submodule)
+    
+    def _load_gitignore_for_repo(self, repo_dir):
+        """Load gitignore patterns for a specific repository"""
+        gitignore_file = repo_dir / '.gitignore'
+        if gitignore_file.exists():
+            try:
+                with open(gitignore_file, 'r', encoding='utf-8') as f:
+                    patterns = []
+                    for line in f:
+                        line = line.strip()
+                        # Skip empty lines and comments
+                        if line and not line.startswith('#'):
+                            patterns.append(line)
+                    self.gitignore_patterns[str(repo_dir)] = patterns
+            except Exception as e:
+                print(f"⚠️  Error reading .gitignore in {repo_dir}: {e}")
+    
+    def _matches_gitignore(self, file_path):
+        """Check if file matches any gitignore pattern"""
+        file_path = Path(file_path).resolve()
+        
+        # Determine which repository this file belongs to
+        repo_dir = None
+        if self._is_in_submodule(file_path):
+            repo_dir = self._get_submodule_for_file(file_path)
+        else:
+            repo_dir = self.repo_dir
+        
+        if not repo_dir or str(repo_dir) not in self.gitignore_patterns:
+            return False
+        
+        patterns = self.gitignore_patterns[str(repo_dir)]
+        
+        # Get relative path from repo root
+        try:
+            rel_path = file_path.relative_to(repo_dir)
+            rel_path_str = str(rel_path)
+            
+            # Check each gitignore pattern
+            for pattern in patterns:
+                # Handle negation patterns (starting with !)
+                if pattern.startswith('!'):
+                    continue  # Skip negation patterns for now (complex logic)
+                
+                # Handle directory patterns (ending with /)
+                if pattern.endswith('/'):
+                    if rel_path.is_dir() and fnmatch.fnmatch(rel_path_str, pattern[:-1]):
+                        return True
+                    # Check if file is inside a directory that matches
+                    for parent in rel_path.parents:
+                        if fnmatch.fnmatch(str(parent), pattern[:-1]):
+                            return True
+                else:
+                    # File pattern matching
+                    if fnmatch.fnmatch(rel_path_str, pattern):
+                        return True
+                    # Check filename only
+                    if fnmatch.fnmatch(file_path.name, pattern):
+                        return True
+                    # Check if any parent directory matches
+                    for parent in rel_path.parents:
+                        if fnmatch.fnmatch(str(parent), pattern):
+                            return True
+            
+            return False
+            
+        except ValueError:
+            # File is not relative to repo dir
+            return False
+    
+    def get_relative_directory(self, file_path):
+        """Get the directory containing the changed file, relative to watch directory"""
+        file_path = Path(file_path).resolve()
+        
+        # Get the directory containing the file
+        if file_path.is_file():
+            containing_dir = file_path.parent
+        else:
+            containing_dir = file_path
+            
+        # Make it relative to the watch directory
+        try:
+            relative_dir = containing_dir.relative_to(self.watch_dir)
+            if str(relative_dir) == '.':
+                return str(self.watch_dir)
+            else:
+                return str(self.watch_dir / relative_dir)
+        except ValueError:
+            # File is outside watch directory
+            return str(containing_dir)
+    
+    def schedule_commit(self, file_path, event_type):
+        """Schedule a commit with delay, canceling any existing timer for the directory"""
+        try:
+            # Determine the directory that should be committed
+            if self._is_in_submodule(file_path):
+                target_dir = self._get_submodule_for_file(file_path)
+                commit_type = "submodule"
+            else:
+                target_dir = self.repo_dir
+                commit_type = "main"
+            
+            if not target_dir:
+                return
+                
+            dir_key = str(target_dir)
+            
+            with self.timer_lock:
+                # Cancel existing timer for this directory
+                if dir_key in self.commit_timers:
+                    self.commit_timers[dir_key].cancel()
+                    print(f"⏰ Canceled previous timer for {target_dir.name}")
+                
+                # Store or update commit information
+                if dir_key not in self.pending_commits:
+                    self.pending_commits[dir_key] = {
+                        'target_dir': target_dir,
+                        'commit_type': commit_type,
+                        'changes': []
+                    }
+                
+                # Add this change to the list of changes
+                self.pending_commits[dir_key]['changes'].append({
+                    'file_path': file_path,
+                    'event_type': event_type,
+                    'file_name': Path(file_path).name
+                })
+                
+                # Create new timer
+                timer = threading.Timer(COMMIT_DELAY, self._execute_delayed_commit, [dir_key])
+                self.commit_timers[dir_key] = timer
+                timer.start()
+                
+                change_count = len(self.pending_commits[dir_key]['changes'])
+                print(f"⏰ Scheduled commit for {target_dir.name} in {COMMIT_DELAY} seconds ({change_count} changes)")
+                    
+        except Exception as e:
+            print(f"Error scheduling commit: {e}")
+    
+    def _execute_delayed_commit(self, dir_key):
+        """Execute the delayed commit for a directory"""
+        with self.timer_lock:
+            if dir_key not in self.pending_commits:
+                return
+                
+            commit_info = self.pending_commits[dir_key]
+            changes = commit_info['changes']
+            
+            if not changes:
+                return
+            
+            try:
+                if commit_info['commit_type'] == 'submodule':
+                    # First commit in the submodule
+                    self._commit_squashed_submodule(commit_info['target_dir'], changes)
+                    # Then commit the submodule change in the main repo
+                    self._commit_submodule_update(commit_info['target_dir'])
+                else:
+                    # Regular files in main repo
+                    self._commit_squashed_main_repo(changes)
+                        
+            except subprocess.CalledProcessError as e:
+                print(f"Error running git command: {e}")
+            except Exception as e:
+                print(f"Unexpected error during commit: {e}")
+            finally:
+                # Clean up
+                self.pending_commits.pop(dir_key, None)
+                self.commit_timers.pop(dir_key, None)
+    
+    def _commit_squashed_submodule(self, submodule_dir, changes):
+        """Commit multiple changes in a submodule as a single commit"""
+        commit_message = self._create_squashed_commit_message(changes, submodule_dir.name)
+        
+        # Run git commands in the submodule
+        subprocess.run(['git', 'add', '.'], cwd=submodule_dir, check=True)
+        result = subprocess.run(
+            ['git', 'commit', '-m', commit_message], 
+            cwd=submodule_dir, 
+            capture_output=True, 
+            text=True
+        )
+        
+        if result.returncode == 0:
+            print(f"✓ Submodule commit: {commit_message}")
+            # Push the submodule changes
+            self._push_changes(submodule_dir, f"submodule {submodule_dir.name}")
+        else:
+            if "nothing to commit" in result.stdout:
+                print(f"No changes to commit in submodule {submodule_dir.name}")
+            else:
+                print(f"Submodule commit failed: {result.stderr}")
+    
+    def _commit_squashed_main_repo(self, changes):
+        """Commit multiple changes in main repo as a single commit"""
+        commit_message = self._create_squashed_commit_message(changes, "main repo")
+        
+        # Run git commands
+        subprocess.run(['git', 'add', '.'], cwd=self.repo_dir, check=True)
+        result = subprocess.run(
+            ['git', 'commit', '-m', commit_message], 
+            cwd=self.repo_dir, 
+            capture_output=True, 
+            text=True
+        )
+        
+        if result.returncode == 0:
+            print(f"✓ Committed: {commit_message}")
+            # Push the main repo changes
+            self._push_changes(self.repo_dir, "main repo")
+        else:
+            if "nothing to commit" in result.stdout:
+                print(f"No changes to commit in main repo")
+            else:
+                print(f"Git commit failed: {result.stderr}")
+    
+    def _create_squashed_commit_message(self, changes, location):
+        """Create a commit message that summarizes all changes"""
+        if len(changes) == 1:
+            change = changes[0]
+            return f"Auto-commit: {change['event_type']} {change['file_name']} in {location}"
+        
+        # Group changes by type
+        created_files = [c['file_name'] for c in changes if c['event_type'] == 'created']
+        modified_files = [c['file_name'] for c in changes if c['event_type'] == 'modified']
+        deleted_files = [c['file_name'] for c in changes if c['event_type'] == 'deleted']
+        
+        message_parts = []
+        
+        if created_files:
+            if len(created_files) == 1:
+                message_parts.append(f"created {created_files[0]}")
+            else:
+                message_parts.append(f"created {len(created_files)} files")
+        
+        if modified_files:
+            if len(modified_files) == 1:
+                message_parts.append(f"modified {modified_files[0]}")
+            else:
+                message_parts.append(f"modified {len(modified_files)} files")
+        
+        if deleted_files:
+            if len(deleted_files) == 1:
+                message_parts.append(f"deleted {deleted_files[0]}")
+            else:
+                message_parts.append(f"deleted {len(deleted_files)} files")
+        
+        return f"Auto-commit: {', '.join(message_parts)} in {location}"
+    
+    def _push_changes(self, repo_dir, repo_name):
+        """Push changes to remote repository"""
+        try:
+            result = subprocess.run(
+                ['git', 'push'],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True
+            )
+            
+            if result.returncode == 0:
+                print(f"🚀 Pushed {repo_name} to remote")
+            else:
+                print(f"⚠️  Push failed for {repo_name}: {result.stderr.strip()}")
+                
+        except subprocess.CalledProcessError as e:
+            print(f"⚠️  Error pushing {repo_name}: {e}")
+        except Exception as e:
+            print(f"⚠️  Unexpected error pushing {repo_name}: {e}")
+    
+    def _commit_in_submodule(self, file_path, event_type, submodule_dir):
+        """Commit changes in a submodule"""
+        file_name = Path(file_path).name
+        commit_message = f"Auto-commit: {event_type} {file_name}"
+        
+        # Run git commands in the submodule
+        subprocess.run(['git', 'add', '.'], cwd=submodule_dir, check=True)
+        result = subprocess.run(
+            ['git', 'commit', '-m', commit_message], 
+            cwd=submodule_dir, 
+            capture_output=True, 
+            text=True
+        )
+        
+        if result.returncode == 0:
+            print(f"✓ Submodule commit: {commit_message} in {submodule_dir.name}")
+            # Push the submodule changes
+            self._push_changes(submodule_dir, f"submodule {submodule_dir.name}")
+        else:
+            if "nothing to commit" in result.stdout:
+                print(f"No changes to commit in submodule {submodule_dir.name}")
+            else:
+                print(f"Submodule commit failed: {result.stderr}")
+    
+    def _commit_submodule_update(self, submodule_dir):
+        """Commit submodule update in main repo"""
+        submodule_name = submodule_dir.relative_to(self.repo_dir)
+        commit_message = f"Update submodule {submodule_name}"
+        
+        # Add the submodule update to the main repo
+        subprocess.run(['git', 'add', str(submodule_name)], cwd=self.repo_dir, check=True)
+        result = subprocess.run(
+            ['git', 'commit', '-m', commit_message], 
+            cwd=self.repo_dir, 
+            capture_output=True, 
+            text=True
+        )
+        
+        if result.returncode == 0:
+            print(f"✓ Main repo commit: {commit_message}")
+            # Push the main repo changes
+            self._push_changes(self.repo_dir, "main repo")
+        else:
+            if "nothing to commit" in result.stdout:
+                print(f"No submodule changes to commit in main repo")
+            else:
+                print(f"Main repo commit failed: {result.stderr}")
+    
+    def _commit_in_main_repo(self, file_path, event_type):
+        """Commit changes in main repo (non-submodule files)"""
+        changed_dir = self.get_relative_directory(file_path)
+        file_name = Path(file_path).name
+        commit_message = f"Auto-commit: {event_type} {file_name} in {changed_dir}"
+        
+        # Run git commands
+        subprocess.run(['git', 'add', '.'], cwd=self.repo_dir, check=True)
+        result = subprocess.run(
+            ['git', 'commit', '-m', commit_message], 
+            cwd=self.repo_dir, 
+            capture_output=True, 
+            text=True
+        )
+        
+        if result.returncode == 0:
+            print(f"✓ Committed: {commit_message}")
+            # Push the main repo changes
+            self._push_changes(self.repo_dir, "main repo")
+        else:
+            if "nothing to commit" in result.stdout:
+                print(f"No changes to commit for {file_name}")
+            else:
+                print(f"Git commit failed: {result.stderr}")
+    
+    def on_modified(self, event):
+        if not event.is_directory:
+            # Check if it's a .gitignore file that changed
+            if event.src_path.endswith('.gitignore'):
+                print(f"Gitignore file modified: {event.src_path}")
+                self._load_gitignore_patterns()
+                return
+            
+            if self._should_exclude_file(event.src_path):
+                return
+            print(f"File modified: {event.src_path}")
+            self.schedule_commit(event.src_path, "modified")
+    
+    def on_created(self, event):
+        if not event.is_directory:
+            # Check if it's a .gitignore file that was created
+            if event.src_path.endswith('.gitignore'):
+                print(f"Gitignore file created: {event.src_path}")
+                self._load_gitignore_patterns()
+                # Still commit the .gitignore file itself
+                self.schedule_commit(event.src_path, "created")
+                return
+            
+            if self._should_exclude_file(event.src_path):
+                return
+            print(f"File created: {event.src_path}")
+            self.schedule_commit(event.src_path, "created")
+    
+    def on_deleted(self, event):
+        if not event.is_directory:
+            if self._should_exclude_file(event.src_path):
+                return
+            print(f"File deleted: {event.src_path}")
+            self.schedule_commit(event.src_path, "deleted")
+    
+    def cleanup(self):
+        """Cancel all pending timers and execute any pending commits"""
+        with self.timer_lock:
+            print("🧹 Cleaning up pending commits...")
+            for dir_key, timer in self.commit_timers.items():
+                timer.cancel()
+                # Execute the pending commit immediately
+                if dir_key in self.pending_commits:
+                    print(f"⚡ Executing pending commit for {Path(dir_key).name}")
+                    self._execute_delayed_commit(dir_key)
+            
+            self.commit_timers.clear()
+            self.pending_commits.clear()
+            
+            # Cancel fetch timer
+            if self.fetch_timer:
+                self.fetch_timer.cancel()
+                print("🧹 Canceled fetch timer")
+    
+    def start_fetch_timer(self):
+        """Start the periodic fetch timer"""
+        self.fetch_timer = threading.Timer(FETCH_INTERVAL, self._periodic_fetch)
+        self.fetch_timer.daemon = True
+        self.fetch_timer.start()
+        print(f"🔄 Started periodic fetch timer (every {FETCH_INTERVAL//60} minutes)")
+    
+    def _periodic_fetch(self):
+        """Periodically fetch from remote and check for changes"""
+        try:
+            print("🔄 Fetching remote changes...")
+            
+            # Fetch and check main repo
+            main_changes = self._fetch_and_check_changes(self.repo_dir, "main repo")
+            
+            # Fetch and check submodules
+            submodule_changes = []
+            for submodule in self.submodules:
+                changes = self._fetch_and_check_changes(submodule, f"submodule {submodule.name}")
+                if changes:
+                    submodule_changes.extend(changes)
+            
+            # Send notifications if there are changes
+            if main_changes or submodule_changes:
+                self._send_change_notification(main_changes, submodule_changes)
+            
+        except Exception as e:
+            print(f"⚠️  Error during periodic fetch: {e}")
+        finally:
+            # Schedule next fetch
+            self.start_fetch_timer()
+    
+    def _fetch_and_check_changes(self, repo_dir, repo_name):
+        """Fetch from remote and check for changes on any branch"""
+        try:
+            # Fetch from remote
+            fetch_result = subprocess.run(
+                ['git', 'fetch', '--all'],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True
+            )
+            
+            if fetch_result.returncode != 0:
+                print(f"⚠️  Fetch failed for {repo_name}: {fetch_result.stderr.strip()}")
+                return []
+            
+            # Get all local branches
+            branches_result = subprocess.run(
+                ['git', 'branch', '--format=%(refname:short)'],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True
+            )
+            
+            if branches_result.returncode != 0:
+                return []
+            
+            branches = branches_result.stdout.strip().split('\n')
+            changes = []
+            
+            for branch in branches:
+                if not branch.strip():
+                    continue
+                    
+                # Check if remote branch exists
+                remote_branch = f"origin/{branch}"
+                remote_check = subprocess.run(
+                    ['git', 'rev-parse', '--verify', remote_branch],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True
+                )
+                
+                if remote_check.returncode != 0:
+                    continue
+                
+                # Compare local and remote branches
+                diff_result = subprocess.run(
+                    ['git', 'rev-list', '--count', f"{branch}..{remote_branch}"],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True
+                )
+                
+                if diff_result.returncode == 0:
+                    ahead_count = int(diff_result.stdout.strip())
+                    if ahead_count > 0:
+                        changes.append({
+                            'branch': branch,
+                            'commits': ahead_count,
+                            'repo': repo_name
+                        })
+            
+            return changes
+            
+        except Exception as e:
+            print(f"⚠️  Error checking changes for {repo_name}: {e}")
+            return []
+    
+    def _send_change_notification(self, main_changes, submodule_changes):
+        """Send desktop notification about remote changes"""
+        try:
+            all_changes = main_changes + submodule_changes
+            if not all_changes:
+                return
+            
+            # Create notification message
+            title = "📡 Remote Changes Detected"
+            message_parts = []
+            
+            if main_changes:
+                main_branches = [f"{c['branch']} ({c['commits']} commits)" for c in main_changes]
+                message_parts.append(f"Main repo: {', '.join(main_branches)}")
+            
+            if submodule_changes:
+                submodule_info = {}
+                for change in submodule_changes:
+                    repo = change['repo']
+                    if repo not in submodule_info:
+                        submodule_info[repo] = []
+                    submodule_info[repo].append(f"{change['branch']} ({change['commits']} commits)")
+                
+                for repo, branches in submodule_info.items():
+                    message_parts.append(f"{repo}: {', '.join(branches)}")
+            
+            message = '\n'.join(message_parts)
+            
+            # Send notification
+            subprocess.run([
+                'notify-send',
+                '-i', 'git',
+                '-t', '10000',  # 10 second timeout
+                title,
+                message
+            ])
+            
+            print(f"📡 Sent notification: {len(all_changes)} branches with changes")
+            
+        except Exception as e:
+            print(f"⚠️  Error sending notification: {e}")
+
+def main():
+    # Expand the watch directory path
+    watch_dir = Path(WATCH_DIRECTORY).expanduser().resolve()
+    
+    # Validate directory exists
+    if not watch_dir.exists():
+        print(f"Error: Directory {watch_dir} does not exist")
+        return
+    
+    # Check if it's a git repository
+    if not (Path(REPO_DIRECTORY) / '.git').exists():
+        print(f"Error: {REPO_DIRECTORY} is not a git repository")
+        return
+    
+    print(f"Watching directory: {watch_dir}")
+    print(f"Git repository: {REPO_DIRECTORY}")
+    print("Press Ctrl+C to stop watching...")
+    
+    # Set up file watcher
+    event_handler = GitCommitHandler(watch_dir, REPO_DIRECTORY)
+    observer = Observer()
+    observer.schedule(event_handler, str(watch_dir), recursive=True)
+    observer.start()
+    
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nStopping file watcher...")
+        observer.stop()
+        event_handler.cleanup()
+    
+    observer.join()
+    print("File watcher stopped.")
+
+if __name__ == "__main__":
+    main()

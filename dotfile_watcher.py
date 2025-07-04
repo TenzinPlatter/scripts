@@ -431,7 +431,8 @@ class GitCommitHandler(FileSystemEventHandler):
             if commit_result.returncode == 0:
                 print(f"✓ Committed: {commit_message}")
                 # Send notification for main repo commit
-                self._send_commit_notification(commit_message)
+                if self.config['enable_notifications'] and self.config['notify_on_commit']:
+                    self._send_commit_notification(commit_message)
                 # Push the main repo changes
                 self._push_changes(self.repo_dir, "main repo")
             else:
@@ -618,7 +619,8 @@ class GitCommitHandler(FileSystemEventHandler):
             if commit_result.returncode == 0:
                 print(f"✓ Main repo commit: {commit_message}")
                 # Send notification for main repo commit
-                self._send_commit_notification(commit_message)
+                if self.config['enable_notifications'] and self.config['notify_on_commit']:
+                    self._send_commit_notification(commit_message)
                 # Push the main repo changes
                 self._push_changes(self.repo_dir, "main repo")
             else:
@@ -646,7 +648,8 @@ class GitCommitHandler(FileSystemEventHandler):
         if result.returncode == 0:
             print(f"✓ Committed: {commit_message}")
             # Send notification for main repo commit
-            self._send_commit_notification(commit_message)
+            if self.config['enable_notifications'] and self.config['notify_on_commit']:
+                self._send_commit_notification(commit_message)
             # Push the main repo changes
             self._push_changes(self.repo_dir, "main repo")
         else:
@@ -733,7 +736,8 @@ class GitCommitHandler(FileSystemEventHandler):
             
             # Send notifications if there are changes
             if main_changes or submodule_changes:
-                self._send_change_notification(main_changes, submodule_changes)
+                if self.config['enable_notifications'] and self.config['notify_on_remote_changes']:
+                    self._send_change_notification(main_changes, submodule_changes)
             
         except Exception as e:
             print(f"⚠️  Error during periodic fetch: {e}")
@@ -949,7 +953,8 @@ class GitCommitHandler(FileSystemEventHandler):
                     
                     # Send notification for main repo commits
                     if repo_dir == self.repo_dir:
-                        self._send_commit_notification(commit_message)
+                        if self.config['enable_notifications'] and self.config['notify_on_commit']:
+                            self._send_commit_notification(commit_message)
                     
                     # Push the changes
                     if repo_dir == self.repo_dir:

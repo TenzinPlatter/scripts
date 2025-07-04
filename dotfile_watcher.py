@@ -373,9 +373,10 @@ class GitCommitHandler(FileSystemEventHandler):
     
     def _commit_squashed_submodule(self, submodule_dir, changes):
         """Commit multiple changes in a submodule as a single commit"""
-        commit_message = self._create_squashed_commit_message(changes, submodule_dir.name)
-        
         try:
+            # Get commit message BEFORE adding files
+            commit_message = self._create_squashed_commit_message(changes, submodule_dir.name)
+            
             # Run git add in the submodule
             add_result = self._run_git_command(['git', 'add', '.'], submodule_dir, "Git add (submodule)")
             if add_result.returncode != 0:
@@ -401,9 +402,10 @@ class GitCommitHandler(FileSystemEventHandler):
     
     def _commit_squashed_main_repo(self, changes):
         """Commit multiple changes in main repo as a single commit"""
-        commit_message = self._create_squashed_commit_message(changes, "main repo")
-        
         try:
+            # Get commit message BEFORE adding files
+            commit_message = self._create_squashed_commit_message(changes, "main repo")
+            
             # Run git add in the main repo
             add_result = self._run_git_command(['git', 'add', '.'], self.repo_dir, "Git add (main repo)")
             if add_result.returncode != 0:
@@ -430,41 +432,50 @@ class GitCommitHandler(FileSystemEventHandler):
             print(f"❌ Error during main repo commit: {e}")
     
     def _create_squashed_commit_message(self, changes, location):
-        """Create a commit message that summarizes all changes based on git status"""
+        """Create a commit message that summarizes all changes from file events"""
+        # Use the actual file paths from changes to determine git status for each file
         repo_dir = self.repo_dir if location == "main repo" else self._get_repo_for_location(location)
         
         try:
-            # Get actual git status to determine real file states
-            status_result = self._run_git_command(
-                ['git', 'status', '--porcelain'],
-                repo_dir,
-                f"Git status for commit message ({location})"
-            )
+            # Get the unique files that actually changed from our events
+            changed_files = set()
+            for change in changes:
+                file_path = Path(change['file_path'])
+                changed_files.add(file_path)
             
-            if status_result.returncode != 0:
-                # Fallback to old logic if git status fails
-                return self._create_fallback_commit_message(changes, location)
+            if not changed_files:
+                return f"update files in {location}"
             
-            # Parse git status output
+            # Check git status for each file that actually changed
             git_changes = {'added': [], 'modified': [], 'deleted': [], 'renamed': []}
             
-            for line in status_result.stdout.strip().split('\n'):
-                if not line.strip():
-                    continue
-                status_code = line[:2]
-                file_path = line[3:].strip()
-                file_name = Path(file_path).name
-                
-                if status_code.startswith('A'):
-                    git_changes['added'].append(file_name)
-                elif status_code.startswith('M') or status_code.endswith('M'):
-                    git_changes['modified'].append(file_name)
-                elif status_code.startswith('D'):
-                    git_changes['deleted'].append(file_name)
-                elif status_code.startswith('R'):
-                    git_changes['renamed'].append(file_name)
+            for file_path in changed_files:
+                try:
+                    # Check if file is tracked by git
+                    tracked_result = self._run_git_command(
+                        ['git', 'ls-files', '--error-unmatch', str(file_path.relative_to(repo_dir))],
+                        repo_dir,
+                        f"Check if file is tracked"
+                    )
+                    
+                    # If file exists and is tracked, it's modified
+                    if file_path.exists() and tracked_result.returncode == 0:
+                        git_changes['modified'].append(file_path.name)
+                    # If file doesn't exist but was tracked, it's deleted
+                    elif not file_path.exists() and tracked_result.returncode == 0:
+                        git_changes['deleted'].append(file_path.name)
+                    # If file exists but not tracked, it's new
+                    elif file_path.exists() and tracked_result.returncode != 0:
+                        git_changes['added'].append(file_path.name)
+                        
+                except Exception:
+                    # If we can't determine, assume it's modified
+                    if file_path.exists():
+                        git_changes['modified'].append(file_path.name)
+                    else:
+                        git_changes['deleted'].append(file_path.name)
             
-            # Build commit message from actual git status
+            # Build commit message from our analysis
             message_parts = []
             
             if git_changes['added']:
@@ -485,19 +496,13 @@ class GitCommitHandler(FileSystemEventHandler):
                 else:
                     message_parts.append(f"remove {len(git_changes['deleted'])} files")
             
-            if git_changes['renamed']:
-                if len(git_changes['renamed']) == 1:
-                    message_parts.append(f"rename {git_changes['renamed'][0]}")
-                else:
-                    message_parts.append(f"rename {len(git_changes['renamed'])} files")
-            
             if message_parts:
                 return f"{', '.join(message_parts)} in {location}"
             else:
                 return f"update files in {location}"
                 
         except Exception as e:
-            print(f"❌ Error creating git-based commit message: {e}")
+            print(f"❌ Error creating commit message: {e}")
             return self._create_fallback_commit_message(changes, location)
     
     def _get_repo_for_location(self, location):

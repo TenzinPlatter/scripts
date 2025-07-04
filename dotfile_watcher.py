@@ -16,7 +16,7 @@ sys.stderr = os.fdopen(sys.stderr.fileno(), 'w', 1)
 
 def load_config():
     """Load configuration from YAML file with fallback to defaults"""
-    config_path = Path(__file__).parent / "config.yaml"
+    config_path = Path(__file__).parent.parent / "config.yaml"
     
     # Default configuration
     default_config = {
@@ -402,7 +402,8 @@ class GitCommitHandler(FileSystemEventHandler):
             if commit_result.returncode == 0:
                 print(f"✓ Submodule commit: {commit_message}")
                 # Push the submodule changes
-                self._push_changes(submodule_dir, f"submodule {submodule_dir.name}")
+                if self.config['auto_push']:
+                    self._push_changes(submodule_dir, f"submodule {submodule_dir.name}")
             else:
                 if "nothing to commit" in commit_result.stdout:
                     print(f"No changes to commit in submodule {submodule_dir.name}")
@@ -434,7 +435,8 @@ class GitCommitHandler(FileSystemEventHandler):
                 if self.config['enable_notifications'] and self.config['notify_on_commit']:
                     self._send_commit_notification(commit_message)
                 # Push the main repo changes
-                self._push_changes(self.repo_dir, "main repo")
+                if self.config['auto_push']:
+                    self._push_changes(self.repo_dir, "main repo")
             else:
                 if "nothing to commit" in commit_result.stdout:
                     print(f"No changes to commit in main repo")
@@ -587,7 +589,8 @@ class GitCommitHandler(FileSystemEventHandler):
         if result.returncode == 0:
             print(f"✓ Submodule commit: {commit_message} in {submodule_dir.name}")
             # Push the submodule changes
-            self._push_changes(submodule_dir, f"submodule {submodule_dir.name}")
+            if self.config['auto_push']:
+                self._push_changes(submodule_dir, f"submodule {submodule_dir.name}")
         else:
             if "nothing to commit" in result.stdout:
                 print(f"No changes to commit in submodule {submodule_dir.name}")
@@ -622,7 +625,8 @@ class GitCommitHandler(FileSystemEventHandler):
                 if self.config['enable_notifications'] and self.config['notify_on_commit']:
                     self._send_commit_notification(commit_message)
                 # Push the main repo changes
-                self._push_changes(self.repo_dir, "main repo")
+                if self.config['auto_push']:
+                    self._push_changes(self.repo_dir, "main repo")
             else:
                 if "nothing to commit" in commit_result.stdout:
                     print(f"No submodule changes to commit in main repo")
@@ -957,10 +961,11 @@ class GitCommitHandler(FileSystemEventHandler):
                             self._send_commit_notification(commit_message)
                     
                     # Push the changes
-                    if repo_dir == self.repo_dir:
-                        self._push_changes(repo_dir, "main repo")
-                    else:
-                        self._push_changes(repo_dir, f"submodule {repo_dir.name}")
+                    if self.config['auto_push']:
+                        if repo_dir == self.repo_dir:
+                            self._push_changes(repo_dir, "main repo")
+                        else:
+                            self._push_changes(repo_dir, f"submodule {repo_dir.name}")
                         # Also update the submodule reference in main repo
                         self._commit_submodule_update(repo_dir)
                         

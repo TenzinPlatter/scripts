@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import sys
 import time
 import subprocess
 import threading
@@ -7,6 +8,10 @@ import fnmatch
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+
+# Ensure stdout/stderr are unbuffered for journalctl
+sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', 1)
+sys.stderr = os.fdopen(sys.stderr.fileno(), 'w', 1)
 
 # Configuration
 WATCH_DIRECTORY = os.path.expanduser("~/.dotfiles")  # Change this to your desired directory
@@ -810,22 +815,25 @@ class GitCommitHandler(FileSystemEventHandler):
             print(f"❌ Error checking existing changes in {repo_name}: {e}")
 
 def main():
+    print(f"🚀 Starting dotfiles watcher v2.0")
+    print(f"📅 {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    
     # Expand the watch directory path
     watch_dir = Path(WATCH_DIRECTORY).expanduser().resolve()
     
     # Validate directory exists
     if not watch_dir.exists():
-        print(f"Error: Directory {watch_dir} does not exist")
+        print(f"❌ Error: Directory {watch_dir} does not exist")
         return
     
     # Check if it's a git repository
     if not (Path(REPO_DIRECTORY) / '.git').exists():
-        print(f"Error: {REPO_DIRECTORY} is not a git repository")
+        print(f"❌ Error: {REPO_DIRECTORY} is not a git repository")
         return
     
-    print(f"Watching directory: {watch_dir}")
-    print(f"Git repository: {REPO_DIRECTORY}")
-    print("Press Ctrl+C to stop watching...")
+    print(f"📁 Watching directory: {watch_dir}")
+    print(f"📦 Git repository: {REPO_DIRECTORY}")
+    print("⏰ Starting file monitoring...")
     
     # Set up file watcher
     event_handler = GitCommitHandler(watch_dir, REPO_DIRECTORY)
@@ -837,12 +845,12 @@ def main():
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\nStopping file watcher...")
+        print("\n🛑 Stopping file watcher...")
         observer.stop()
         event_handler.cleanup()
     
     observer.join()
-    print("File watcher stopped.")
+    print("✅ File watcher stopped.")
 
 if __name__ == "__main__":
     main()

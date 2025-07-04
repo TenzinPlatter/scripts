@@ -340,12 +340,12 @@ class GitCommitHandler(FileSystemEventHandler):
                 })
                 
                 # Create new timer
-                timer = threading.Timer(COMMIT_DELAY, self._execute_delayed_commit, [dir_key])
+                timer = threading.Timer(self.config['commit_delay'], self._execute_delayed_commit, [dir_key])
                 self.commit_timers[dir_key] = timer
                 timer.start()
                 
                 change_count = len(self.pending_commits[dir_key]['changes'])
-                print(f"⏰ Scheduled commit for {target_dir.name} in {COMMIT_DELAY} seconds ({change_count} changes)")
+                print(f"⏰ Scheduled commit for {target_dir.name} in {self.config['commit_delay']} seconds ({change_count} changes)")
                     
         except Exception as e:
             print(f"Error scheduling commit: {e}")
@@ -711,10 +711,10 @@ class GitCommitHandler(FileSystemEventHandler):
     
     def start_fetch_timer(self):
         """Start the periodic fetch timer"""
-        self.fetch_timer = threading.Timer(FETCH_INTERVAL, self._periodic_fetch)
+        self.fetch_timer = threading.Timer(self.config['fetch_interval'], self._periodic_fetch)
         self.fetch_timer.daemon = True
         self.fetch_timer.start()
-        print(f"🔄 Started periodic fetch timer (every {FETCH_INTERVAL//60} minutes)")
+        print(f"🔄 Started periodic fetch timer (every {self.config['fetch_interval']//60} minutes)")
     
     def _periodic_fetch(self):
         """Periodically fetch from remote and check for changes"""
@@ -970,7 +970,7 @@ def main():
     print(f"📅 {time.strftime('%Y-%m-%d %H:%M:%S')}")
     
     # Expand the watch directory path
-    watch_dir = Path(WATCH_DIRECTORY).expanduser().resolve()
+    watch_dir = Path(CONFIG['watch_directory']).expanduser().resolve()
     
     # Validate directory exists
     if not watch_dir.exists():
@@ -978,16 +978,16 @@ def main():
         return
     
     # Check if it's a git repository
-    if not (Path(REPO_DIRECTORY) / '.git').exists():
-        print(f"❌ Error: {REPO_DIRECTORY} is not a git repository")
+    if not (Path(CONFIG['repo_directory']) / '.git').exists():
+        print(f"❌ Error: {CONFIG['repo_directory']} is not a git repository")
         return
     
     print(f"📁 Watching directory: {watch_dir}")
-    print(f"📦 Git repository: {REPO_DIRECTORY}")
+    print(f"📦 Git repository: {CONFIG['repo_directory']}")
     print("⏰ Starting file monitoring...")
     
     # Set up file watcher
-    event_handler = GitCommitHandler(watch_dir, REPO_DIRECTORY)
+    event_handler = GitCommitHandler(CONFIG)
     observer = Observer()
     observer.schedule(event_handler, str(watch_dir), recursive=True)
     observer.start()

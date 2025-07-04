@@ -433,7 +433,88 @@ class GitCommitHandler(FileSystemEventHandler):
             print(f"❌ Error during main repo commit: {e}")
     
     def _create_squashed_commit_message(self, changes, location):
-        """Create a commit message that summarizes all changes"""
+        """Create a commit message that summarizes all changes based on git status"""
+        repo_dir = self.repo_dir if location == "main repo" else self._get_repo_for_location(location)
+        
+        try:
+            # Get actual git status to determine real file states
+            status_result = self._run_git_command(
+                ['git', 'status', '--porcelain'],
+                repo_dir,
+                f"Git status for commit message ({location})"
+            )
+            
+            if status_result.returncode != 0:
+                # Fallback to old logic if git status fails
+                return self._create_fallback_commit_message(changes, location)
+            
+            # Parse git status output
+            git_changes = {'added': [], 'modified': [], 'deleted': [], 'renamed': []}
+            
+            for line in status_result.stdout.strip().split('\n'):
+                if not line.strip():
+                    continue
+                status_code = line[:2]
+                file_path = line[3:].strip()
+                file_name = Path(file_path).name
+                
+                if status_code.startswith('A'):
+                    git_changes['added'].append(file_name)
+                elif status_code.startswith('M') or status_code.endswith('M'):
+                    git_changes['modified'].append(file_name)
+                elif status_code.startswith('D'):
+                    git_changes['deleted'].append(file_name)
+                elif status_code.startswith('R'):
+                    git_changes['renamed'].append(file_name)
+            
+            # Build commit message from actual git status
+            message_parts = []
+            
+            if git_changes['added']:
+                if len(git_changes['added']) == 1:
+                    message_parts.append(f"add {git_changes['added'][0]}")
+                else:
+                    message_parts.append(f"add {len(git_changes['added'])} files")
+            
+            if git_changes['modified']:
+                if len(git_changes['modified']) == 1:
+                    message_parts.append(f"update {git_changes['modified'][0]}")
+                else:
+                    message_parts.append(f"update {len(git_changes['modified'])} files")
+            
+            if git_changes['deleted']:
+                if len(git_changes['deleted']) == 1:
+                    message_parts.append(f"remove {git_changes['deleted'][0]}")
+                else:
+                    message_parts.append(f"remove {len(git_changes['deleted'])} files")
+            
+            if git_changes['renamed']:
+                if len(git_changes['renamed']) == 1:
+                    message_parts.append(f"rename {git_changes['renamed'][0]}")
+                else:
+                    message_parts.append(f"rename {len(git_changes['renamed'])} files")
+            
+            if message_parts:
+                return f"{', '.join(message_parts)} in {location}"
+            else:
+                return f"update files in {location}"
+                
+        except Exception as e:
+            print(f"❌ Error creating git-based commit message: {e}")
+            return self._create_fallback_commit_message(changes, location)
+    
+    def _get_repo_for_location(self, location):
+        """Get repository directory for a given location string"""
+        if "submodule" in location:
+            # Extract submodule name and find its directory
+            submodule_name = location.replace("submodule ", "")
+            for submodule in self.submodules:
+                if submodule.name == submodule_name:
+                    return submodule
+        return self.repo_dir
+    
+    def _create_fallback_commit_message(self, changes, location):
+        """Fallback commit message creation using file system events"""
         if len(changes) == 1:
             change = changes[0]
             return f"{change['event_type']} {change['file_name']} in {location}"
@@ -447,21 +528,21 @@ class GitCommitHandler(FileSystemEventHandler):
         
         if created_files:
             if len(created_files) == 1:
-                message_parts.append(f"created {created_files[0]}")
+                message_parts.append(f"add {created_files[0]}")
             else:
-                message_parts.append(f"created {len(created_files)} files")
+                message_parts.append(f"add {len(created_files)} files")
         
         if modified_files:
             if len(modified_files) == 1:
-                message_parts.append(f"modified {modified_files[0]}")
+                message_parts.append(f"update {modified_files[0]}")
             else:
-                message_parts.append(f"modified {len(modified_files)} files")
+                message_parts.append(f"update {len(modified_files)} files")
         
         if deleted_files:
             if len(deleted_files) == 1:
-                message_parts.append(f"deleted {deleted_files[0]}")
+                message_parts.append(f"remove {deleted_files[0]}")
             else:
-                message_parts.append(f"deleted {len(deleted_files)} files")
+                message_parts.append(f"remove {len(deleted_files)} files")
         
         return f"{', '.join(message_parts)} in {location}"
     

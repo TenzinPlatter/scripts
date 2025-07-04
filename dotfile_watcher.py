@@ -31,6 +31,8 @@ class GitCommitHandler(FileSystemEventHandler):
         self.excluded_patterns = [
             '.git/',
             '.git\\',
+            '/.git/',
+            '\\.git\\',
             'index.lock',
             'COMMIT_EDITMSG',
             'HEAD.lock',
@@ -48,7 +50,24 @@ class GitCommitHandler(FileSystemEventHandler):
             '.tmp_',
             '__pycache__/',
             '.pyc',
-            '.pyo'
+            '.pyo',
+            # More comprehensive git exclusions
+            '.git/index',
+            '.git/HEAD',
+            '.git/refs/',
+            '.git/logs/',
+            '.git/objects/',
+            '.git/modules/',
+            'ORIG_HEAD',
+            'FETCH_HEAD',
+            'MERGE_HEAD',
+            'CHERRY_PICK_HEAD',
+            # Temporary files
+            '.swp',
+            '.swo',
+            '.tmp',
+            '~',
+            '.bak'
         ]
         self.gitignore_patterns = {}  # Cache gitignore patterns per directory
         self._load_gitignore_patterns()
@@ -121,15 +140,30 @@ class GitCommitHandler(FileSystemEventHandler):
     
     def _should_exclude_file(self, file_path):
         """Check if file should be excluded from git operations"""
+        file_path = Path(file_path).resolve()
         file_path_str = str(file_path)
+        file_name = file_path.name
         
         # Check if any excluded pattern matches the file path
         for pattern in self.excluded_patterns:
             if pattern in file_path_str:
                 return True
         
-        # Additional check for git internal files
-        if '/.git/' in file_path_str or '\\.git\\' in file_path_str:
+        # Check if filename ends with excluded extensions
+        if file_name.endswith(('.lock', '.tmp', '.swp', '.swo', '~', '.bak')):
+            return True
+        
+        # Check if it's a git internal file (more comprehensive)
+        if ('/.git/' in file_path_str or 
+            '\\.git\\' in file_path_str or
+            file_path_str.endswith('/.git') or
+            '/.git/index' in file_path_str or
+            any(part.startswith('.git') for part in file_path.parts)):
+            return True
+        
+        # Check for git metadata files in any directory
+        git_files = {'COMMIT_EDITMSG', 'ORIG_HEAD', 'FETCH_HEAD', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'HEAD', 'index'}
+        if file_name in git_files:
             return True
         
         # Check if file matches gitignore patterns
@@ -508,35 +542,38 @@ class GitCommitHandler(FileSystemEventHandler):
         if not event.is_directory:
             # Check if it's a .gitignore file that changed
             if event.src_path.endswith('.gitignore'):
-                print(f"Gitignore file modified: {event.src_path}")
+                print(f"📝 Gitignore file modified: {event.src_path}")
                 self._load_gitignore_patterns()
                 return
             
             if self._should_exclude_file(event.src_path):
+                print(f"🚫 Excluded file: {event.src_path}")
                 return
-            print(f"File modified: {event.src_path}")
+            print(f"📝 File modified: {event.src_path}")
             self.schedule_commit(event.src_path, "modified")
     
     def on_created(self, event):
         if not event.is_directory:
             # Check if it's a .gitignore file that was created
             if event.src_path.endswith('.gitignore'):
-                print(f"Gitignore file created: {event.src_path}")
+                print(f"📝 Gitignore file created: {event.src_path}")
                 self._load_gitignore_patterns()
                 # Still commit the .gitignore file itself
                 self.schedule_commit(event.src_path, "created")
                 return
             
             if self._should_exclude_file(event.src_path):
+                print(f"🚫 Excluded file: {event.src_path}")
                 return
-            print(f"File created: {event.src_path}")
+            print(f"✨ File created: {event.src_path}")
             self.schedule_commit(event.src_path, "created")
     
     def on_deleted(self, event):
         if not event.is_directory:
             if self._should_exclude_file(event.src_path):
+                print(f"🚫 Excluded file: {event.src_path}")
                 return
-            print(f"File deleted: {event.src_path}")
+            print(f"🗑️ File deleted: {event.src_path}")
             self.schedule_commit(event.src_path, "deleted")
     
     def cleanup(self):
